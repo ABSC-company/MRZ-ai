@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+pipeline_results
+build.log
+tree.txt
+Выборка фото
+tools/benchmark_report.csv
