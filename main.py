@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 import torch
@@ -15,6 +16,21 @@ from run_mrz_pipeline import MRZPipeline
 pipeline = None
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int | None) -> int | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -25,11 +41,31 @@ async def lifespan(app: FastAPI):
         if torch.cuda.is_available()
         else "cpu"
     )
+    max_crops = _env_int("MRZ_MAX_CROPS", 2)
+    try_upside_down = _env_flag("MRZ_TRY_UPSIDE_DOWN", True)
+    orientation_retry = _env_flag("MRZ_ORIENTATION_RETRY", True)
+    use_easyocr = _env_flag("MRZ_USE_EASYOCR", True)
+    easyocr_aggressive = _env_flag("MRZ_EASYOCR_AGGRESSIVE", True)
+
+    print(
+        "MRZ API config: "
+        f"device={device} "
+        f"max_crops={max_crops or 'all'} "
+        f"try_upside_down={try_upside_down} "
+        f"orientation_retry={orientation_retry} "
+        f"use_easyocr={use_easyocr} "
+        f"easyocr_aggressive={easyocr_aggressive}"
+    )
 
     pipeline = MRZPipeline(
         crop_model=Path("models/unet_resnet34.pth"),
         device=device,
-        debug=False
+        debug=False,
+        max_crop_candidates=max_crops,
+        try_upside_down=try_upside_down,
+        orientation_retry=orientation_retry,
+        use_easyocr=use_easyocr,
+        easyocr_aggressive=easyocr_aggressive,
     )
 
     yield

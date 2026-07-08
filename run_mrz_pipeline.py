@@ -580,22 +580,33 @@ def _orientation_score(texts: list[str]) -> float:
 
     return score
 
-def _best_orientation_mrz(mrz_image: np.ndarray, scanner_func) -> tuple[np.ndarray, list[str]]:
+def _normalize_mrz_image(mrz_image: np.ndarray) -> np.ndarray:
+    h, w = mrz_image.shape[:2]
+    if h > w:
+        return cv2.rotate(mrz_image, cv2.ROTATE_90_CLOCKWISE)
+    return mrz_image
+
+
+def _best_orientation_mrz(
+        mrz_image: np.ndarray,
+        recognize_func,
+        postprocess_func,
+) -> tuple[np.ndarray, list[str], str]:
     """
     Перебирает 0° и 180° ориентации MRZ-зоны, выбирает лучшую.
     Возвращает кортеж: (лучшее изображение MRZ, распознанный текст для этой ориентации).
     """
     if mrz_image is None:
-        return mrz_image, []
+        return mrz_image, [], ""
 
     # Шаг 1: нормализовать к горизонтальному виду
-    h, w = mrz_image.shape[:2]
-    if h > w:
-        mrz_image = cv2.rotate(mrz_image, cv2.ROTATE_90_CLOCKWISE)
+    mrz_image = _normalize_mrz_image(mrz_image)
 
-    # Шаг 2: проверить 0° и 180°
+    # Шаг 2: проверить 0° и 180°. Здесь используем recognition-only,
+    # потому что MRZ-зона уже найдена детектором на исходном документе.
     best_img   = mrz_image
     best_texts = []
+    best_msg   = ""
     best_score = -float("inf")
 
     for angle, rotated in [
@@ -603,10 +614,12 @@ def _best_orientation_mrz(mrz_image: np.ndarray, scanner_func) -> tuple[np.ndarr
         (180, cv2.rotate(mrz_image, cv2.ROTATE_180)),
     ]:
         try:
-            res   = scanner_func(rotated, do_center_crop=False, do_postprocess=True)
-            texts = [str(t) for t in res.get("mrz_texts", []) if str(t)]
+            raw_texts = recognize_func(rotated)
+            texts = [str(t) for t in raw_texts if str(t)]
+            texts, msg = postprocess_func(texts)
         except Exception:
             texts = []
+            msg = ""
 
         sc = _orientation_score(texts)
         # debug only
@@ -615,8 +628,9 @@ def _best_orientation_mrz(mrz_image: np.ndarray, scanner_func) -> tuple[np.ndarr
             best_score = sc
             best_img   = rotated
             best_texts = texts
+            best_msg   = msg
 
-    return best_img, best_texts
+    return best_img, best_texts, str(best_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -985,17 +999,16 @@ def _choose_mrz_ocr_variant(candidates: list[str]) -> str:
     return max(cleaned, key=score)
 
 
-def _read_easyocr_mrz_line(reader, line_img: np.ndarray) -> str:
+def _read_easyocr_mrz_line(reader, line_img: np.ndarray, aggressive: bool = True) -> str:
     variants: list[str] = []
-    read_configs = [
-        {},
-        {
+    read_configs = [{}]
+    if aggressive:
+        read_configs.append({
             "text_threshold": 0.05,
             "low_text": 0.05,
             "link_threshold": 0.05,
             "mag_ratio": 2.0,
-        },
-    ]
+        })
     for config in read_configs:
         try:
             results = reader.readtext(
@@ -1015,9 +1028,26 @@ def _read_easyocr_mrz_line(reader, line_img: np.ndarray) -> str:
 # ---------------------------------------------------------------------------
 
 class MRZPipeline:
-    def __init__(self, crop_model: Path, device: torch.device, debug: bool = False) -> None:
+    def __init__(
+            self,
+            crop_model: Path,
+            device: torch.device,
+            debug: bool = False,
+            max_crop_candidates: int | None = None,
+            try_upside_down: bool = True,
+            orientation_retry: bool = True,
+            use_easyocr: bool = True,
+            easyocr_aggressive: bool = True,
+    ) -> None:
 
         self.debug = debug
+        if max_crop_candidates is not None and max_crop_candidates <= 0:
+            max_crop_candidates = None
+        self.max_crop_candidates = max_crop_candidates
+        self.try_upside_down = try_upside_down
+        self.orientation_retry = orientation_retry
+        self.use_easyocr = use_easyocr
+        self.easyocr_aggressive = easyocr_aggressive
 
         self.cropper = DocumentCropper(crop_model, device)
         backend = (
@@ -1026,9 +1056,13 @@ class MRZPipeline:
             else cb.Backend.cpu
         )
         self.scanner = MRZScanner(model_type=ModelType.two_stage, backend=backend)
-        import easyocr
-
+        detector_providers = getattr(getattr(self.scanner.detector, "model", None), "providers", [])
+        recognizer_providers = getattr(getattr(self.scanner.recognizer, "model", None), "providers", [])
+        print(f"MRZScanner providers: detector={detector_providers} recognizer={recognizer_providers}")
         try:
+            if not use_easyocr:
+                raise RuntimeError("EasyOCR fallback disabled")
+            import easyocr
             self.easyocr_reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
             self.has_easyocr = True
 
@@ -1069,17 +1103,46 @@ class MRZPipeline:
         # Извлекаем MRZ-зону из полигона
         mrz_image = four_point_transform(image, polygon) if polygon.shape == (4, 2) else None
 
-        # -----------------------------------------------------------------
-        # ИСПРАВЛЕНИЕ: перебираем ориентации MRZ-зоны (0° и 180°) и выбираем
-        # ту, у которой сканер даёт лучший score.
-        # Теперь мы сохраняем и обновляем корректные тексты (texts)!
-        # -----------------------------------------------------------------
-        if mrz_image is not None:
-            mrz_image, texts = _best_orientation_mrz(mrz_image, self.scanner)
-
-        # Вычисляем валидацию и скоринг на основе ФИНАЛЬНОГО корректного текста
         validation = validate_mrz(texts)
         score = mrz_score(texts, msg, validation)
+
+        # Дорогой retry ориентации запускаем только если первичный результат
+        # невалиден. Для MRZ crop используем recognition-only, а не полный
+        # detector+recognizer, потому что зона MRZ уже найдена.
+        if mrz_image is not None and self.orientation_retry and not mrz_is_fully_valid(validation):
+            recognizer = getattr(self.scanner, "recognizer", None)
+            if recognizer is not None:
+                t0 = time.perf_counter()
+                retry_image, retry_texts, retry_msg = _best_orientation_mrz(
+                    mrz_image,
+                    recognizer,
+                    self.scanner.postprocess,
+                )
+                retry_validation = validate_mrz(retry_texts)
+                retry_score = mrz_score(retry_texts, retry_msg, retry_validation)
+                current_result = MRZResult(texts, polygon, mrz_image, [], rotation, str(msg), score, validation)
+                retry_result = MRZResult(
+                    retry_texts,
+                    polygon,
+                    retry_image,
+                    [],
+                    rotation,
+                    str(retry_msg),
+                    retry_score,
+                    retry_validation,
+                )
+                if final_mrz_score(retry_result) > final_mrz_score(current_result):
+                    mrz_image = retry_image
+                    texts = retry_texts
+                    msg = retry_msg
+                    validation = retry_validation
+                    score = retry_score
+                print(
+                    f"MRZ orientation retry: "
+                    f"{time.perf_counter() - t0:.2f}s"
+                )
+        elif mrz_image is not None:
+            mrz_image = _normalize_mrz_image(mrz_image)
 
         # Штраф за плохое соотношение сторон (MRZ всегда широкая)
         if mrz_image is not None:
@@ -1100,7 +1163,13 @@ class MRZPipeline:
             t0 = time.perf_counter()
             raw_fallback_texts = []
             for idx, line_img in enumerate(line_images):
-                raw_fallback_texts.append(_read_easyocr_mrz_line(self.easyocr_reader, line_img))
+                raw_fallback_texts.append(
+                    _read_easyocr_mrz_line(
+                        self.easyocr_reader,
+                        line_img,
+                        aggressive=self.easyocr_aggressive,
+                    )
+                )
 
             # Keep each OCR line at the length EasyOCR actually observed.
             fallback_texts = [text for text in raw_fallback_texts if text]
@@ -1141,7 +1210,8 @@ class MRZPipeline:
             -1.0
         )
 
-        for rotation in (0, 180):
+        rotations = (0, 180) if self.try_upside_down else (0,)
+        for rotation in rotations:
             img       = rotate_image(document_bgr, rotation)
             candidate = self._run_scanner(img, rotation)
 
@@ -1177,7 +1247,17 @@ class MRZPipeline:
                 f"{w}x{h}"
             )
 
-        best_crop   = crop_candidates[0]
+        scan_candidates = crop_candidates
+        if self.max_crop_candidates is not None:
+            scan_candidates = crop_candidates[:max(1, self.max_crop_candidates)]
+
+        if len(scan_candidates) < len(crop_candidates):
+            print(
+                f"scan_best_crop: scanning "
+                f"{len(scan_candidates)}/{len(crop_candidates)} crop candidates"
+            )
+
+        best_crop   = scan_candidates[0]
         best_result = self.scan_mrz(best_crop.image)
 
 
@@ -1185,7 +1265,7 @@ class MRZPipeline:
         if mrz_is_fully_valid(best_result.validation):
             return best_crop, best_result, crop_candidates
 
-        for crop in crop_candidates[1:]:
+        for crop in scan_candidates[1:]:
             candidate_result = self.scan_mrz(crop.image)
 
 
@@ -1478,6 +1558,12 @@ def main() -> int:
     parser.add_argument("--out",        type=Path, default=Path("pipeline_results"))
     parser.add_argument("--crop-model", type=Path, default=Path(__file__).parent / "models" / "unet_resnet34.pth")
     parser.add_argument("--no-debug",   action="store_true")
+    parser.add_argument("--fast",       action="store_true", help="Scan at most two crop candidates.")
+    parser.add_argument("--max-crops",  type=int, default=None, help="Limit scanned crop candidates; 0 means all.")
+    parser.add_argument("--no-upside-down", action="store_true", help="Do not retry the whole document at 180 degrees.")
+    parser.add_argument("--no-orientation-retry", action="store_true", help="Skip recognition-only MRZ crop orientation retry.")
+    parser.add_argument("--no-easyocr", action="store_true", help="Disable EasyOCR fallback.")
+    parser.add_argument("--easyocr-fast", action="store_true", help="Use one EasyOCR pass per MRZ line.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1490,7 +1576,19 @@ def main() -> int:
         print("No images found.")
         return 1
 
-    pipeline = MRZPipeline(args.crop_model, device)
+    max_crops = args.max_crops
+    if args.fast and max_crops is None:
+        max_crops = 2
+
+    pipeline = MRZPipeline(
+        args.crop_model,
+        device,
+        max_crop_candidates=max_crops,
+        try_upside_down=not args.no_upside_down,
+        orientation_retry=not args.no_orientation_retry,
+        use_easyocr=not args.no_easyocr,
+        easyocr_aggressive=not args.easyocr_fast,
+    )
     rows: list[dict[str, object]] = []
 
     for idx, path in enumerate(images, start=1):
