@@ -1,13 +1,14 @@
 .git
-.gitignore
-.venv
+.github
 .idea
+.venv
+archive
 __pycache__
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.log
+.env
+secrets
+tests
+local_samples
 pipeline_results
-build.log
-tree.txt
-Выборка фото
-tools/benchmark_report.csv
+weights/*.pth

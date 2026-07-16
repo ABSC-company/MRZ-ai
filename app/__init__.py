@@ -1,0 +1,1 @@
+"""MRZ document recognition service."""

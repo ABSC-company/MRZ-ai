@@ -1,0 +1,11 @@
+# Inference-only RT-DETR configuration for the nine visual identity fields.
+__include__:
+  - "../vendor/rtdetrv2_pytorch/configs/rtdetrv2/rtdetrv2_r18vd_120e_coco.yml"
+
+num_classes: 9
+remap_mscoco_category: false
+eval_spatial_size: [960, 960]
+use_ema: true
+
+PResNet:
+  pretrained: false

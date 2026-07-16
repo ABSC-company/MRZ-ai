@@ -1,34 +1,14 @@
-# Environments
+.env
+.idea/
 .venv/
-venv/
-env/
-
-# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-
-# IDE / OS
-.idea/
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Generated outputs
-pipeline_results/
-outputs/
-build.log
-tree.txt
 *.log
-
-# Local/private input data
+archive/
+pipeline_results/
 local_samples/
-local_data/
-samples_private/
-
-# Test/benchmark generated files
-tools/benchmark_report.csv
-
-# Keep model/checkpoint files tracked intentionally.
-!models/*.pth
-!MRZScanner/mrzscanner/**/*.onnx
+secrets/*
+!secrets/.gitignore
+weights/*.pth
+weights/*.pt
+weights/*.onnx

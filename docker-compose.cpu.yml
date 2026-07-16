@@ -1,0 +1,10 @@
+services:
+  mrz-api:
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements.txt
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    gpus: !reset []
+    environment:
+      MRZ_DEVICE: cpu
+      FALLBACK_DEVICE: cpu

@@ -1,0 +1,24 @@
+{$DOMAIN:localhost} {
+    request_body {
+        max_size {$MAX_REQUEST_SIZE:22MB}
+    }
+
+    encode zstd gzip
+
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+    }
+
+    reverse_proxy mrz-api:8000 {
+        transport http {
+            read_timeout 180s
+            write_timeout 180s
+        }
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}

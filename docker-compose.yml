@@ -1,0 +1,110 @@
+services:
+  mrz-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        REQUIREMENTS_FILE: requirements-gpu.txt
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+    image: mrz-service:latest
+    restart: unless-stopped
+    gpus: all
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      ENABLE_DOCS: ${ENABLE_DOCS:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-*}
+      API_KEY_REQUIRED: ${API_KEY_REQUIRED:-1}
+      API_KEY_FILE: /run/secrets/mrz_api_key
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-60000000}
+      MAX_DOCUMENT_PAGES: ${MAX_DOCUMENT_PAGES:-10}
+      MRZ_CROP_MODEL: /app/weights/unet_resnet34.pth
+      MRZ_DEVICE: ${MRZ_DEVICE:-cuda}
+      MRZ_MAX_CROPS: ${MRZ_MAX_CROPS:-2}
+      MRZ_TRY_UPSIDE_DOWN: ${MRZ_TRY_UPSIDE_DOWN:-1}
+      MRZ_ORIENTATION_RETRY: ${MRZ_ORIENTATION_RETRY:-1}
+      MRZ_USE_EASYOCR: ${MRZ_USE_EASYOCR:-1}
+      MRZ_EASYOCR_AGGRESSIVE: ${MRZ_EASYOCR_AGGRESSIVE:-1}
+      FALLBACK_ENABLED: ${FALLBACK_ENABLED:-1}
+      FALLBACK_REQUIRED: ${FALLBACK_REQUIRED:-1}
+      FALLBACK_CONFIG: /app/configs/cards_rtdetrv2_r18.yml
+      FALLBACK_WEIGHTS: /app/weights/cards_rtdetrv2_r18_best.pth
+      FALLBACK_RTDETR_REPO: /app/vendor/rtdetrv2_pytorch
+      FALLBACK_DEVICE: ${FALLBACK_DEVICE:-cuda}
+      FALLBACK_THRESHOLD: ${FALLBACK_THRESHOLD:-0.40}
+      FALLBACK_CROP_PADDING: ${FALLBACK_CROP_PADDING:-0.08}
+      FALLBACK_OCR_LANGS: ${FALLBACK_OCR_LANGS:-ru,en}
+    secrets:
+      - mrz_api_key
+    volumes:
+      - ./weights:/app/weights:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 1gb
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 30s
+
+  https:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      mrz-api:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      MAX_REQUEST_SIZE: ${MAX_REQUEST_SIZE:-22MB}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    networks:
+      - backend
+      - edge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  mrz_api_key:
+    file: ./secrets/api_key.txt
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend: {}
+  edge:
