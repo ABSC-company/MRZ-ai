@@ -12,3 +12,5 @@ secrets/*
 weights/*.pth
 weights/*.pt
 weights/*.onnx
+!vendor/MRZScanner/mrzscanner/rec/ckpt/mrz_recognition_20250221_fp32.onnx
+!vendor/MRZScanner/mrzscanner/det/ckpt/mrz_detection_20250222_fp32.onnx
