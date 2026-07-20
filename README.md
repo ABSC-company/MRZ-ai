@@ -57,7 +57,6 @@ MRZ Project/
   docker-compose.yml
   docker-compose.cpu.yml
   requirements.txt
-  requirements-gpu.txt
 ```
 
 
@@ -69,7 +68,7 @@ MRZ Project/
 cd "D:\ML\MRZ Project"
 .\.venv\Scripts\activate
 python -m pip install -e .\vendor\MRZScanner
-python -m pip install -r requirements-gpu.txt
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 python -m uvicorn app.main:app --host 127.0.0.1 --port 5000
 ```
